@@ -3,7 +3,7 @@
 Connect-MgGraph -Scopes "AppRoleAssignment.ReadWrite.All", "Application.Read.All"
 
 $managedIdentityObjectId = "<Managed Identity Object ID>"
-$permissions = "DeviceManagementManagedDevices.Read.All", "Device.Read.All","GroupMember.ReadWrite.All"
+$permissions = "DeviceManagementManagedDevices.Read.All", "Device.Read.All", "User.Read.All", "GroupMember.ReadWrite.All"
 
 $graphApi = Get-MgServicePrincipal -Filter "appId eq '00000003-0000-0000-c000-000000000000'"
 $permissions = $graphApi.AppRoles | Where-Object { $_.Value -in $permissions -and $_.AllowedMemberTypes -contains "Application" }

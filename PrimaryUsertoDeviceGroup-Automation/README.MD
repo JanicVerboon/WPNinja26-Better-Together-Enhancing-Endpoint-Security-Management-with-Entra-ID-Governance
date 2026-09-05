@@ -18,6 +18,15 @@ The `Invoke-PrimaryUsertoDeviceGroup` function performs the following steps:
 
 If the source user group is empty, all members currently in the target device group are removed. If no matching managed Windows devices are found, the target group is left unchanged.
 
+## Automation Patterns
+
+The two scripts support different automation scenarios:
+
+- **Scheduled reconciliation:** Use `Invoke-PrimaryUsertoDeviceGroup.ps1` on a fixed schedule, for example with an Azure Automation schedule. Each run checks the members of the user group and reconciles the target device group. This recurring check is useful for catching newly enrolled Windows devices after Intune has assigned their primary user, as well as removing devices that are no longer in scope.
+- **Immediate user processing:** Use `Invoke-UsertoDeviceGroup.ps1` when a specific user is added to or removed from the user group through an Entra ID Governance access package. An external workflow, such as an access-package lifecycle workflow, Logic App, or other automation, can invoke the script immediately with the user object ID and the appropriate action. The script then finds that user's managed devices and adds or removes them from the target device group without waiting for the next scheduled reconciliation.
+
+The second pattern requires an automation trigger that can detect the access-package assignment or user-group membership change. The PowerShell script performs the device lookup and group update; it does not itself listen for access-package events. The scheduled script can still be retained as a periodic safety net for devices enrolled after the immediate workflow has run.
+
 ## Requirements
 
 - PowerShell 7 or later is recommended.
@@ -26,14 +35,9 @@ If the source user group is empty, all members currently in the target device gr
 	- `Microsoft.Graph.Groups`
 	- `Microsoft.Graph.DeviceManagement`
 	- `Microsoft.Graph.Identity.DirectoryManagement`
+	- `Microsoft.Graph.Users`
 - The script must run in a context that supports managed identity authentication, such as an Azure Automation runbook, Azure Function, or another Azure-hosted workload with an assigned managed identity.
 - The managed identity must have access to the required Microsoft Graph application permissions.
-
-Install the required modules with:
-
-```powershell
-Install-Module Microsoft.Graph -Scope CurrentUser
-```
 
 The script uses `Connect-MgGraph -Identity`; it does not prompt for delegated user sign-in.
 
@@ -43,6 +47,7 @@ Assign these Microsoft Graph application permissions to the managed identity tha
 
 - `DeviceManagementManagedDevices.Read.All`
 - `Device.Read.All`
+- `User.Read.All`
 - `GroupMember.ReadWrite.All`
 
 The included `assign_MI_permissions.ps1` script assigns the permissions to the managed identity. Replace `<Managed Identity Object ID>` before running it:
@@ -53,7 +58,7 @@ The included `assign_MI_permissions.ps1` script assigns the permissions to the m
 Connect-MgGraph -Scopes "AppRoleAssignment.ReadWrite.All", "Application.Read.All"
 
 $managedIdentityObjectId = "<Managed Identity Object ID>"
-$permissions = "DeviceManagementManagedDevices.Read.All", "Device.Read.All", "GroupMember.ReadWrite.All"
+$permissions = "DeviceManagementManagedDevices.Read.All", "Device.Read.All", "User.Read.All", "GroupMember.ReadWrite.All"
 
 $graphApi = Get-MgServicePrincipal -Filter "appId eq '00000003-0000-0000-c000-000000000000'"
 $permissions = $graphApi.AppRoles | Where-Object {
@@ -177,7 +182,56 @@ $AllManagedDevices = Get-MgDeviceManagementManagedDevice `
 	}
 ```
 
+## Add or Remove Devices for One User
+
+`Invoke-UsertoDeviceGroup.ps1` is an alternative version for changing the device group membership of one specific user. It accepts all inputs as mandatory script parameters so it can be run directly by Azure Automation. The script first verifies that the `UserId` exists in Entra ID, then retrieves managed devices whose Intune `UserId` matches that value.
+
+This version does not filter by operating system, so it can process Windows, Android, macOS, and other managed device platforms returned by Intune. The `Action` parameter controls whether devices are added or removed. Before processing, the script verifies the user's membership in `UserGroup`:
+
+> **Note**
+The filter for Platforms can be added if required
+
+- `Add` proceeds regardless of whether the user is currently a member of `UserGroup`. This supports adding devices immediately when an access-package assignment event is processed before group membership is visible.
+- `Remove` proceeds only when the user is no longer a member of `UserGroup`.
+
+This prevents devices from being removed while the user is still entitled to the user group. The script changes only the target user's devices and does not reconcile unrelated group members.
+
+If the target device group is empty, an `Add` action adds all resolved managed devices for the user. A `Remove` action completes without making changes and reports that there are no group members to remove.
+
+When running the script directly, for example from an Azure Automation runbook, pass all parameters to the script:
+
+```powershell
+.\Invoke-UsertoDeviceGroup.ps1 `
+	-DeviceGroup "22222222-2222-2222-2222-222222222222" `
+	-UserId "33333333-3333-3333-3333-333333333333" `
+	-UserGroup "11111111-1111-1111-1111-111111111111" `
+	-Action userAdd
+```
+
+The parameters are:
+
+| Parameter | Required | Description |
+| --- | --- | --- |
+| `DeviceGroup` | Yes | Object ID of the Entra ID device group to update. |
+| `UserId` | Yes | Object ID of the Entra ID user to verify and process. The script fails if the user does not exist. |
+| `UserGroup` | Yes | Object ID of the Entra ID user group used to verify the user's membership. |
+| `Action` | Yes | `userAdd` or `AdminAdd` adds the user's managed devices regardless of current `UserGroup` membership; `userRemove` or `adminRemove` removes them only when the user is no longer in `UserGroup`. |
+
+The script trims leading and trailing whitespace from the object ID parameters. This accommodates Azure Automation values that were copied or supplied with a trailing newline. All three object IDs must still be valid GUIDs; invalid values are rejected before Microsoft Graph is called.
+
+As with the original script, the managed device must have an `AzureADDeviceId` that can be matched to an Entra device object. Devices without a matching Entra device are skipped. The managed identity requires permission to read users, managed devices, Entra devices, and user-group membership, as well as permission to add or remove members from the target device group.
+
+## Additional permissions
+
+If the Invoke-UsertoDeviceGroup script is used as a custom extension, make sure to also perform the following steps: 
+* Enable the System assigned Managed Identity on the Logic App of the Custom Extension
+* Grant the Logic app's Managed Identity the following Azure RBAC permissions on the Azure Automation Account: Automation Job Operator & Automation Runbook Operator
+* Grant the Logic Apps Managed Identity the following permission within the Catalog where the Access Package resides: Access package assignment manager
+
+> Note: More information why the Access package assignment manager role is required can be found [here:](https://learn.microsoft.com/en-us/graph/api/accesspackageassignmentrequest-resume?view=graph-rest-1.0&tabs=http#permissions)
+
 ## Related Files
 
 - `Invoke-PrimaryUsertoDeviceGroup.ps1` contains the synchronization logic.
+- `Invoke-UsertoDeviceGroup.ps1` adds or removes the managed devices for one user in a device group.
 - `assign_MI_permissions.ps1` assigns the required Microsoft Graph application permissions to a managed identity.

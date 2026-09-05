@@ -236,6 +236,8 @@ catch {
     throw Could not connect to Graph... Error: $_
 }
 
-#Add Invoke-PrimaryUsertoDeviceGroup according to the different options in the readme file!
+Invoke-PrimaryUsertoDeviceGroup `
+		-UserGroup "11111111-1111-1111-1111-111111111111" `
+		-DeviceGroup "22222222-2222-2222-2222-222222222222"
 
 
